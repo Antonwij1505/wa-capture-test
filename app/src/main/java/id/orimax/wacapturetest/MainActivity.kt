@@ -85,19 +85,26 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQ_PROJ) {
-            if (resultCode == RESULT_OK && data != null) {
-                CaptureService.lastError = null
-                val i = Intent(this, CaptureService::class.java).apply {
-                    putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode)
-                    putExtra(CaptureService.EXTRA_RESULT_DATA, data)
-                }
-                if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
-                toast("Mulai merekam. Notifikasi harus muncul di bar atas.")
-            } else {
-                toast("Ditolak. Izin rekam tidak diberikan.")
-            }
+        if (requestCode != REQ_PROJ) return
+
+        // The projection grant must be a real RESULT_OK *with* data.
+        // Logcat showed the dialog closing ~0.26s after the tap -> the grant
+        // never happened, service started with null data and stopped itself.
+        if (resultCode != RESULT_OK || data == null) {
+            CaptureService.lastError =
+                "Izin rekam DITOLAK atau dialog tertutup terlalu cepat (resultCode=$resultCode)."
+            CaptureService.isRunning = false
+            toast("Izin ditolak. Ulangi dan tekan \"Mulai sekarang\".")
+            return
         }
+
+        val i = Intent(this, CaptureService::class.java).apply {
+            putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode)
+            putExtra(CaptureService.EXTRA_RESULT_DATA, data)
+        }
+        CaptureService.lastError = null
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+        toast("Izin diterima. Merekam…")
     }
 
     private fun stopCapture() {
@@ -132,7 +139,9 @@ class MainActivity : Activity() {
         val running = CaptureService.isRunning
 
         btnStart.isEnabled = !running
-        btnStop.isEnabled = running
+        // Stop stays clickable whenever a service may still exist, so the user
+        // is never stuck with a dead UI.
+        btnStop.isEnabled = running || CaptureService.lastFile != null
 
         if (running) {
             levelBar.progress = CaptureService.currentAmplitude

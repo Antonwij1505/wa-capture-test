@@ -82,7 +82,10 @@ class CaptureService : Service() {
         @Suppress("DEPRECATION")
         val data: Intent? = intent?.getParcelableExtra(EXTRA_RESULT_DATA)
         if (code == -1 || data == null) {
-            Log.e(TAG, "Missing projection result")
+            lastError = "Izin MediaProjection tidak diterima (data kosong). " +
+                    "Coba lagi dan pastikan menekan tombol 'Mulai sekarang/Start now' di dialog."
+            Log.e(TAG, "Missing projection result (code=$code data=$data)")
+            isRunning = false
             stopSelf()
             return START_NOT_STICKY
         }
@@ -98,7 +101,10 @@ class CaptureService : Service() {
     private fun startForegroundCompat() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(CHANNEL_ID, "Capture", NotificationManager.IMPORTANCE_LOW)
+            // IMPORTANCE_LOW made ColorOS classify this as "unimportant notification"
+            // and hide it from the shade. Use DEFAULT so it stays visible.
+            val ch = NotificationChannel(CHANNEL_ID, "Capture", NotificationManager.IMPORTANCE_DEFAULT)
+            ch.setShowBadge(false)
             nm.createNotificationChannel(ch)
         }
         val stopIntent = Intent(this, CaptureService::class.java).setAction(ACTION_STOP)
