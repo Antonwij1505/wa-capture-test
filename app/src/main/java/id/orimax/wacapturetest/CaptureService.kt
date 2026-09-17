@@ -37,6 +37,7 @@ class CaptureService : Service() {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
         const val CHANNEL_ID = "capture_channel"
+        const val ACTION_STOP = "id.orimax.wacapturetest.STOP"
 
         /** Live amplitude (0..32767) for the UI level meter. */
         @Volatile var currentAmplitude: Int = 0
@@ -45,6 +46,7 @@ class CaptureService : Service() {
         @Volatile var totalBufferCount: Int = 0
         @Volatile var isRunning: Boolean = false
         @Volatile var lastFile: File? = null
+        @Volatile var lastError: String? = null
     }
 
     private var projection: MediaProjection? = null
@@ -63,6 +65,19 @@ class CaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Notification "Stop" button path.
+        if (intent?.action == ACTION_STOP) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        // CRITICAL: startForeground() must happen within ~5s of
+        // startForegroundService(), BEFORE any user dialog / slow work.
+        // v1 called it after MediaProjection was resolved -> Android killed
+        // the app: "Context.startForegroundService() did not then call
+        // Service.startForeground()".
+        startForegroundCompat()
+
         val code = intent?.getIntExtra(EXTRA_RESULT_CODE, -1) ?: -1
         @Suppress("DEPRECATION")
         val data: Intent? = intent?.getParcelableExtra(EXTRA_RESULT_DATA)
@@ -71,8 +86,12 @@ class CaptureService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startForegroundCompat()
-        startCapture(code, data)
+        try {
+            startCapture(code, data)
+        } catch (t: Throwable) {
+            Log.e(TAG, "startCapture failed", t)
+            stopSelf()
+        }
         return START_NOT_STICKY
     }
 
@@ -82,10 +101,22 @@ class CaptureService : Service() {
             val ch = NotificationChannel(CHANNEL_ID, "Capture", NotificationManager.IMPORTANCE_LOW)
             nm.createNotificationChannel(ch)
         }
+        val stopIntent = Intent(this, CaptureService::class.java).setAction(ACTION_STOP)
+        val stopPi = android.app.PendingIntent.getService(
+            this, 0, stopIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notif: Notification = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("WA Capture Test")
-            .setContentText("Merekam audio panggilan…")
+            .setContentText("Merekam audio panggilan… (tap Stop untuk berhenti)")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
+            .addAction(
+                Notification.Action.Builder(
+                    android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPi
+                ).build()
+            )
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -96,12 +127,22 @@ class CaptureService : Service() {
     }
 
     private fun startCapture(resultCode: Int, data: Intent) {
+        lastError = null
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projection = mpm.getMediaProjection(resultCode, data)
         val proj = projection ?: run {
-            Log.e(TAG, "getMediaProjection returned null")
+            lastError = "getMediaProjection returned null"
+            Log.e(TAG, lastError!!)
             stopSelf(); return
         }
+
+        // Required on Android 14+; harmless and recommended on 11.
+        proj.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                Log.w(TAG, "MediaProjection stopped by system/user")
+                isRunning = false
+            }
+        }, android.os.Handler(android.os.Looper.getMainLooper()))
 
         // --- The crucial part: capture OTHER apps' audio output (WhatsApp). ---
         val captureConfig = AudioPlaybackCaptureConfiguration.Builder(proj)
@@ -130,15 +171,16 @@ class CaptureService : Service() {
 
         val ar = audioRecord!!
         if (ar.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord not initialized (state=${ar.state})")
+            lastError = "AudioRecord gagal init (state=${ar.state}); device mungkin blokir capture"
+            Log.e(TAG, lastError!!)
             stopSelf(); return
         }
 
         lastFile = buildOutputFile()
         setupEncoder(lastFile!!)
 
-        recordThread = Thread { recordLoop(ar) }.also { it.start() }
         isRunning = true
+        recordThread = Thread { recordLoop(ar) }.also { it.start() }
         Log.i(TAG, "Capture started -> ${lastFile!!.absolutePath}")
     }
 
@@ -265,6 +307,7 @@ class CaptureService : Service() {
         isRunning = false
         recordThread?.interrupt()
         runCatching { projection?.stop() }
+        runCatching { stopForeground(true) }
         super.onDestroy()
     }
 }

@@ -10,7 +10,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.View
 import android.widget.Button
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -18,6 +17,12 @@ import android.widget.Toast
 import java.io.File
 import java.util.Locale
 
+/**
+ * Test UI. IMPORTANT: the UI never "remembers" the recording state itself —
+ * it polls CaptureService's static flags every 250 ms. That way, closing and
+ * reopening the app (or the screen going black for MediaProjection) always
+ * shows the TRUE state: still recording, or stopped.
+ */
 class MainActivity : Activity() {
 
     private lateinit var levelBar: ProgressBar
@@ -48,6 +53,9 @@ class MainActivity : Activity() {
         btnStart.setOnClickListener { requestThenStart() }
         btnStop.setOnClickListener { stopCapture() }
         btnPlay.setOnClickListener { playResult() }
+
+        // Start polling immediately: reflects service state even after reopen.
+        startPolling()
     }
 
     private fun requestThenStart() {
@@ -79,16 +87,13 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_PROJ) {
             if (resultCode == RESULT_OK && data != null) {
+                CaptureService.lastError = null
                 val i = Intent(this, CaptureService::class.java).apply {
                     putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode)
                     putExtra(CaptureService.EXTRA_RESULT_DATA, data)
                 }
                 if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
-                btnStart.isEnabled = false
-                btnStop.isEnabled = true
-                btnPlay.isEnabled = false
-                tvStatus.text = "Merekam… sekarang lakukan panggilan WA."
-                startMeter()
+                toast("Mulai merekam. Notifikasi harus muncul di bar atas.")
             } else {
                 toast("Ditolak. Izin rekam tidak diberikan.")
             }
@@ -97,25 +102,13 @@ class MainActivity : Activity() {
 
     private fun stopCapture() {
         stopService(Intent(this, CaptureService::class.java))
-        btnStart.isEnabled = true
-        btnStop.isEnabled = false
-        btnPlay.isEnabled = true
-        tvStatus.text = "Berhenti. Tekan \"Putar Hasil\" untuk mendengarkan."
-        stopMeter()
-        val f = CaptureService.lastFile
-        if (f != null && f.exists()) {
-            tvFile.text = "File: ${f.absolutePath}\nUkuran: ${f.length() / 1024} KB"
-            if (f.length() < 5_000) {
-                tvStatus.text =
-                    "PERINGATAN: file sangat kecil (${f.length()} byte). Kemungkinan tidak ada audio tertangkap."
-            }
-        }
+        CaptureService.isRunning = false
     }
 
     private fun playResult() {
         val f: File? = CaptureService.lastFile
         if (f == null || !f.exists()) { toast("Belum ada file hasil."); return }
-        player?.release()
+        runCatching { player?.release() }
         player = MediaPlayer().apply {
             setDataSource(f.absolutePath)
             setOnCompletionListener { toast("Selesai memutar.") }
@@ -125,29 +118,56 @@ class MainActivity : Activity() {
         toast("Memutar: ${f.name}")
     }
 
-    private fun startMeter() {
+    /** Single source of truth: poll the service's public state. */
+    private fun startPolling() {
         handler.post(object : Runnable {
             override fun run() {
-                if (!CaptureService.isRunning) return
-                levelBar.progress = CaptureService.currentAmplitude
-                val total = CaptureService.totalBufferCount
-                val loud = CaptureService.loudBufferCount
-                tvSignal.text = String.format(
-                    Locale.US,
-                    "Sinyal: %d buffer, %d berbunyi (%.0f%%)",
-                    total, loud, if (total > 0) loud * 100.0 / total else 0.0
-                )
-                handler.postDelayed(this, 200)
+                renderState()
+                handler.postDelayed(this, 250)
             }
         })
     }
 
-    private fun stopMeter() { handler.removeCallbacksAndMessages(null) }
+    private fun renderState() {
+        val running = CaptureService.isRunning
+
+        btnStart.isEnabled = !running
+        btnStop.isEnabled = running
+
+        if (running) {
+            levelBar.progress = CaptureService.currentAmplitude
+            val total = CaptureService.totalBufferCount
+            val loud = CaptureService.loudBufferCount
+            tvStatus.text = "SEDANG MEREKAM (app boleh diminimize)."
+            tvSignal.text = String.format(
+                Locale.US,
+                "Sinyal: %d buffer, %d berbunyi (%.0f%%)",
+                total, loud, if (total > 0) loud * 100.0 / total else 0.0
+            )
+        } else {
+            levelBar.progress = 0
+            val err = CaptureService.lastError
+            tvStatus.text = if (err != null) "GAGAL: $err"
+            else "Siap. Tekan \"Mulai Rekam\" lalu terima dialog izin Android."
+        }
+
+        val f = CaptureService.lastFile
+        if (f != null && f.exists()) {
+            btnPlay.isEnabled = !running
+            val kb = f.length() / 1024
+            val warn = if (!running && f.length() < 5_000)
+                "  <-- terlalu kecil, audio kemungkinan TIDAK tertangkap" else ""
+            tvFile.text = "File: ${f.name}\nUkuran: $kb KB$warn"
+        } else {
+            btnPlay.isEnabled = false
+            if (!running) tvFile.text = "Belum ada file."
+        }
+    }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
     override fun onDestroy() {
-        stopMeter()
+        handler.removeCallbacksAndMessages(null)
         player?.release()
         super.onDestroy()
     }
