@@ -134,13 +134,15 @@ class CaptureService : Service() {
 
     private fun startCapture(resultCode: Int, data: Intent) {
         lastError = null
+        Log.i(TAG, "startCapture: attaching MediaProjection (resultCode=$resultCode)")
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projection = mpm.getMediaProjection(resultCode, data)
+        projection = runCatching { mpm.getMediaProjection(resultCode, data) }.getOrNull()
         val proj = projection ?: run {
-            lastError = "getMediaProjection returned null"
+            lastError = "getMediaProjection() mengembalikan null — izin tidak valid. Ulangi dari awal."
             Log.e(TAG, lastError!!)
             stopSelf(); return
         }
+        Log.i(TAG, "MediaProjection attached OK")
 
         // Required on Android 14+; harmless and recommended on 11.
         proj.registerCallback(object : MediaProjection.Callback() {
@@ -169,21 +171,38 @@ class CaptureService : Service() {
         )
         val bufSize = maxOf(minBuf * 4, sampleRate * channelCount * 2)
 
-        audioRecord = AudioRecord.Builder()
-            .setAudioFormat(format)
-            .setBufferSizeInBytes(bufSize)
-            .setAudioPlaybackCaptureConfig(captureConfig)
-            .build()
+        audioRecord = runCatching {
+            AudioRecord.Builder()
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(bufSize)
+                .setAudioPlaybackCaptureConfig(captureConfig)
+                .build()
+        }.getOrNull()
 
-        val ar = audioRecord!!
-        if (ar.state != AudioRecord.STATE_INITIALIZED) {
-            lastError = "AudioRecord gagal init (state=${ar.state}); device mungkin blokir capture"
+        val ar = audioRecord
+        if (ar == null) {
+            lastError = "AudioRecord gagal dibuat (device mungkin blokir AudioPlaybackCapture)."
             Log.e(TAG, lastError!!)
             stopSelf(); return
         }
+        if (ar.state != AudioRecord.STATE_INITIALIZED) {
+            lastError = "AudioRecord gagal init (state=${ar.state}); device mungkin blokir capture"
+            Log.e(TAG, lastError!!)
+            runCatching { ar.release() }
+            audioRecord = null
+            stopSelf(); return
+        }
+        Log.i(TAG, "AudioRecord initialized OK (minBuf=$minBuf bufSize=$bufSize)")
 
         lastFile = buildOutputFile()
-        setupEncoder(lastFile!!)
+        runCatching { setupEncoder(lastFile!!) }.onFailure { t ->
+            lastError = "Encoder AAC gagal disiapkan: ${t.message}"
+            Log.e(TAG, lastError!!, t)
+            runCatching { ar.release() }
+            audioRecord = null
+            stopSelf(); return
+        }
+        Log.i(TAG, "Encoder + muxer siap")
 
         isRunning = true
         recordThread = Thread { recordLoop(ar) }.also { it.start() }
@@ -212,12 +231,20 @@ class CaptureService : Service() {
 
     private fun recordLoop(ar: AudioRecord) {
         val pcm = ShortArray(sampleRate * channelCount / 10) // ~100 ms
-        val bytes = ByteArray(pcm.size * 2)
         ar.startRecording()
+        Log.i(TAG, "recordLoop: startRecording() called, state=${ar.recordingState}")
+        var loggedFirst = false
         try {
             while (isRunning && !Thread.currentThread().isInterrupted) {
                 val n = ar.read(pcm, 0, pcm.size)
-                if (n <= 0) continue
+                if (n <= 0) {
+                    Log.w(TAG, "recordLoop: read()=$n (error=${ar.recordingState})")
+                    continue
+                }
+                if (!loggedFirst) {
+                    Log.i(TAG, "recordLoop: first audio buffer n=$n samples — capture is delivering data")
+                    loggedFirst = true
+                }
 
                 // Level meter + signal presence check.
                 var peak = 0
@@ -233,11 +260,13 @@ class CaptureService : Service() {
             }
         } catch (t: Throwable) {
             Log.e(TAG, "recordLoop error", t)
+            lastError = "Error saat merekam: ${t.message}"
         } finally {
             runCatching { ar.stop() }
             runCatching { ar.release() }
             audioRecord = null
             signalEndOfStream()
+            Log.i(TAG, "recordLoop: stopped (total=$totalBufferCount loud=$loudBufferCount)")
         }
     }
 

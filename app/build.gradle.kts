@@ -11,14 +11,18 @@ android {
         applicationId = "id.orimax.wacapturetest"
         minSdk = 29          // Android 10 = batas minimum AudioPlaybackCapture
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 4
+        versionName = "4.0"
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
         }
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {

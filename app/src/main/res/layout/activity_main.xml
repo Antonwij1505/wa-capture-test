@@ -78,4 +78,14 @@
         android:textSize="11sp"
         android:text="File: -"/>
 
+    <TextView
+        android:id="@+id/tvVersion"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="14dp"
+        android:textSize="11sp"
+        android:textColor="#888888"
+        android:gravity="center"
+        android:text="v?"/>
+
 </LinearLayout>
